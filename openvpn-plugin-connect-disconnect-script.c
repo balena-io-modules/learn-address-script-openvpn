@@ -27,7 +27,7 @@
 
 /********** Constants */
 /* For consistency in log messages */
-#define PLUGIN_NAME "auth-script"
+#define PLUGIN_NAME "client-connect-disconnect-script"
 #define OPENVPN_PLUGIN_VERSION_MIN 3
 #define SCRIPT_NAME_IDX 0
 
@@ -106,7 +106,7 @@ static int deferred_handler(struct plugin_context *context,
         
         /* Let our parent know that our child is working appropriately */
         if (pid > 0)
-                exit(OPENVPN_PLUGIN_FUNC_DEFERRED);
+                exit(OPENVPN_PLUGIN_FUNC_SUCCESS);
 
         /* Child Spawn - This process actually spawns the script */
         
@@ -221,10 +221,9 @@ OPENVPN_EXPORT int openvpn_plugin_open_v3(const int struct_version,
         }
 
         /* Tell OpenVPN we want to handle these calls */
-        retptr->type_mask = OPENVPN_PLUGIN_MASK(
-                        OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY);
+        retptr->type_mask = OPENVPN_PLUGIN_MASK(OPENVPN_PLUGIN_CLIENT_CONNECT) | OPENVPN_PLUGIN_MASK(OPENVPN_PLUGIN_CLIENT_DISCONNECT);
 
-        
+
         /*
          * Determine the size of the arguments provided so we can allocate and
          * argv array of appropriate length.
@@ -275,7 +274,7 @@ OPENVPN_EXPORT int openvpn_plugin_open_v3(const int struct_version,
         return OPENVPN_PLUGIN_FUNC_SUCCESS;
 }
 
-/* Called when we need to handle OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY calls */
+/* Called when we need to handle  OPENVPN_PLUGIN_CLIENT_CONNECT | OPENVPN_PLUGIN_CLIENT_DISCONNECT calls */
 OPENVPN_EXPORT int openvpn_plugin_func_v3(const int struct_version,
                 struct openvpn_plugin_args_func_in const *arguments,
                 struct openvpn_plugin_args_func_return *retptr)
@@ -294,7 +293,7 @@ OPENVPN_EXPORT int openvpn_plugin_func_v3(const int struct_version,
                 return OPENVPN_PLUGIN_FUNC_ERROR;
         }
 
-        if(arguments->type == OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY) {
+        if(arguments->type == OPENVPN_PLUGIN_CLIENT_CONNECT || arguments->type == OPENVPN_PLUGIN_CLIENT_DISCONNECT) {
                 log(PLOG_DEBUG, PLUGIN_NAME,
                                 "Handling auth with deferred script");
                 return deferred_handler(context, arguments->envp);
