@@ -12,11 +12,11 @@ Copy your external script onto the machine in a sane place, making sure it's exe
 
 Configure the plugin in your openvpn config, passing the path to the external script as the second argument:
 
-    plugin /path/to/openvpn-plugin-learn-address-script.so /path/to/external/script.sh
+    plugin /path/to/openvpn-plugin-learn-address-script.so /path/to/external/script.sh downrate uprate
 
 The plugin will also pass any strings provided after the script name as arguments to the script execution:
 
-    plugin /path/to/openvpn-plugin-learn-address-script.so /path/to/external/script.sh (add|update|delete) ip user
+    plugin /path/to/openvpn-plugin-learn-address-script.so /path/to/external/script.sh downrate uprate (add|update|delete) ip user
 
 ## External Script requirements
 

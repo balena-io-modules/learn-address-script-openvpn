@@ -35,6 +35,8 @@ struct plugin_context
 {
         plugin_log_t plugin_log;
         char * script_path;
+        char * downrate;
+        char * uprate;
 };
 
 /* Handle a learn address */
@@ -123,8 +125,23 @@ static int deferred_handler(struct plugin_context *context,
         close(STDOUT_FILENO);
         close(STDERR_FILENO);
 
+        /* Prepare args. The script expects downrate and uprate as 
+           first two args after the script name. 
+         * Note that argv is null-terminated.
+        */
+        int argv_count = 0;
+        for (; argv[argv_count]; argv_count++) ;
+
+        char * argv_with_rates [argv_count + 3]; //downrate, uprate, and terminating NULL
+        argv_with_rates[0] = strdup(argv[0]);
+        argv_with_rates[1] = strdup(context->downrate);
+        argv_with_rates[2] = strdup(context->uprate);
+        for(int i = 1; i < argv_count; i++)
+                argv_with_rates[i+2] = strdup(argv[i]);
+        argv_with_rates[argv_count+2] = NULL;
+
         int execve_rc = execve(context->script_path, 
-                        (char *const*)argv, 
+                        (char *const*)argv_with_rates, 
                         (char *const*)envp);
         if ( execve_rc == -1 ) {
                 switch(errno) {
@@ -203,6 +220,8 @@ OPENVPN_EXPORT int openvpn_plugin_min_version_required_v1()
  * Handle plugin initialization
  *        arguments->argv[0] is path to shared lib
  *        arguments->argv[1] is expected to be path to script
+ *        arguments->argv[2] is downrate
+ *        arguments->argv[3] is uprate
  */
 OPENVPN_EXPORT int openvpn_plugin_open_v3(const int struct_version,
                 struct openvpn_plugin_args_open_in const *arguments,
@@ -242,6 +261,8 @@ OPENVPN_EXPORT int openvpn_plugin_open_v3(const int struct_version,
 
         context->plugin_log = log;
         context->script_path = strdup(arguments->argv[1]);
+        context->downrate = strdup(arguments->argv[2]);
+        context->uprate = strdup(arguments->argv[3]);
 
         /* Pass state back to OpenVPN so we get handed it back later */
         retptr->handle = (void *) context;
