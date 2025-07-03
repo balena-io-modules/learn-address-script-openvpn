@@ -1,9 +1,8 @@
 /*
- * auth-script OpenVPN plugin
+ * learn-address-script OpenVPN plugin
  * 
- * Runs an external script to decide whether to authenticate a user or not.
- * Useful for checking 2FA on VPN auth attempts as it doesn't block the main
- * openvpn process, unlike passing the script to --auth-user-pass-verify.
+ * Runs an external script to help define firewall rules and other address-specific options
+ * It doesn't block the main openvpn process.
  * 
  * Functions required to be a valid OpenVPN plugin:
  * openvpn_plugin_open_v3
@@ -27,27 +26,31 @@
 
 /********** Constants */
 /* For consistency in log messages */
-#define PLUGIN_NAME "client-connect-disconnect-script"
+#define PLUGIN_NAME "learn-address-script"
 #define OPENVPN_PLUGIN_VERSION_MIN 3
 #define SCRIPT_NAME_IDX 0
 
 /* Where we store our own settings/state */
-struct plugin_context 
+struct plugin_context
 {
         plugin_log_t plugin_log;
-        const char *argv[];
+        char * script_path;
+        char * downrate;
+        char * uprate;
+        int debug_mode; // Not used, but can be set to 1 to enable debug mode
 };
 
-/* Handle an authentication request */
+/* Handle a learn address */
 static int deferred_handler(struct plugin_context *context, 
-                const char *envp[])
+                const char *envp[],
+                const char *argv[])
 {
         plugin_log_t log = context->plugin_log;
         pid_t pid;
 
         log(PLOG_DEBUG, PLUGIN_NAME, 
                         "Deferred handler using script_path=%s", 
-                        context->argv[SCRIPT_NAME_IDX]);
+                        context->script_path);
 
         pid = fork();
 
@@ -68,7 +71,7 @@ static int deferred_handler(struct plugin_context *context,
                 int wstatus;
 
                 log(PLOG_DEBUG, PLUGIN_NAME, "child pid is %d", pid);
-                
+
                 /* Block until the child returns */
                 wait_rc = waitpid(pid, &wstatus, 0);
 
@@ -103,13 +106,13 @@ static int deferred_handler(struct plugin_context *context,
         /* Notify our parent that our child faild to fork */
         if (pid < 0) 
                 exit(OPENVPN_PLUGIN_FUNC_ERROR);
-        
+
         /* Let our parent know that our child is working appropriately */
         if (pid > 0)
                 exit(OPENVPN_PLUGIN_FUNC_SUCCESS);
 
         /* Child Spawn - This process actually spawns the script */
-        
+
         /* Daemonize */
         umask(0);
         setsid();
@@ -123,9 +126,62 @@ static int deferred_handler(struct plugin_context *context,
         close(STDOUT_FILENO);
         close(STDERR_FILENO);
 
-        int execve_rc = execve(context->argv[0], 
-                        (char *const*)context->argv, 
-                        (char *const*)envp);
+        // The script expects: script_name, downrate, uprate, action, ip, cn, [debug]
+        // The C plugin passes: downrate, uprate, action, ip, cn, [debug]
+        // The OS provides the script_name as argv[0] to the script.
+
+        /* Prepare args for the script */
+        int event_argc = 0;
+        while(argv[event_argc]) event_argc++;
+
+        // Allocate space for: script_path + downrate + uprate + event_args + debug + NULL terminator
+        char *new_argv[1 + 2 + event_argc + 1 + 1];
+        int i = 0;
+
+        // By convention, argv[0] for the new process should be the program name itself.
+        // The script will see this as $0.
+        new_argv[i] = strdup(context->script_path);
+        if (new_argv[i] == NULL) {
+                goto cleanup_and_exit;
+        }
+        i++;
+
+        // Now, add the arguments the script will see as $1, $2, etc.
+        new_argv[i] = strdup(context->downrate);
+        if (new_argv[i] == NULL) {
+                goto cleanup_and_exit;
+        }
+        i++;
+
+        new_argv[i] = strdup(context->uprate);
+        if (new_argv[i] == NULL) {
+                goto cleanup_and_exit;
+        }
+        i++;
+
+        // Copy the event arguments from OpenVPN (action, ip, cn)
+        for (int j = 1; j < event_argc; j++) {
+                new_argv[i] = strdup(argv[j]);
+                if (new_argv[i] == NULL) {
+                        goto cleanup_and_exit;
+                }
+                i++;
+        }
+
+        // If debug mode is enabled, add the "debug" argument
+        if (context->debug_mode) {
+                new_argv[i] = strdup("debug");
+                if (new_argv[i] == NULL) {
+                        goto cleanup_and_exit;
+                }
+                i++;
+        }
+
+        // Terminate the argument list
+        new_argv[i] = NULL;
+
+        int execve_rc = execve(context->script_path, new_argv, (char *const*)envp);
+
         if ( execve_rc == -1 ) {
                 switch(errno) {
                         case E2BIG:
@@ -189,8 +245,14 @@ static int deferred_handler(struct plugin_context *context,
                                                 "Error trying to exec: unknown, errno: %d", 
                                                 errno);
                 }
+                goto cleanup_and_exit;
         }
-        exit(EXIT_FAILURE);
+
+cleanup_and_exit:
+        for (int cleanup = 0; cleanup < i; cleanup++) {
+                free(new_argv[cleanup]);
+        }
+        exit(OPENVPN_PLUGIN_FUNC_ERROR);
 }
 
 /* We require OpenVPN Plugin API v3 */
@@ -203,6 +265,8 @@ OPENVPN_EXPORT int openvpn_plugin_min_version_required_v1()
  * Handle plugin initialization
  *        arguments->argv[0] is path to shared lib
  *        arguments->argv[1] is expected to be path to script
+ *        arguments->argv[2] is downrate
+ *        arguments->argv[3] is uprate
  */
 OPENVPN_EXPORT int openvpn_plugin_open_v3(const int struct_version,
                 struct openvpn_plugin_args_open_in const *arguments,
@@ -221,60 +285,68 @@ OPENVPN_EXPORT int openvpn_plugin_open_v3(const int struct_version,
         }
 
         /* Tell OpenVPN we want to handle these calls */
-        retptr->type_mask = OPENVPN_PLUGIN_MASK(OPENVPN_PLUGIN_CLIENT_CONNECT) | OPENVPN_PLUGIN_MASK(OPENVPN_PLUGIN_CLIENT_DISCONNECT);
-
-
-        /*
-         * Determine the size of the arguments provided so we can allocate and
-         * argv array of appropriate length.
-         */
-        size_t arg_size = 0;
-        for (int arg_idx = 1; arguments->argv[arg_idx]; arg_idx++)
-                arg_size += strlen(arguments->argv[arg_idx]);
-
-
-        /* 
-         * Plugin init will fail unless we create a handler, so we'll store our
-         * script path and it's arguments there as we have to create it anyway. 
-         */
-        context = (struct plugin_context *) malloc(
-                        sizeof(struct plugin_context) + arg_size);
-        memset(context, 0, sizeof(struct plugin_context) + arg_size);
-        context->plugin_log = log;
-
-
-        /* 
-         * Check we've been handed a script path to call
-         * This comes directly from openvpn config file:
-         *           plugin /path/to/auth.so /path/to/auth/script.sh
-         *
-         * IDX 0 should correspond to the library, IDX 1 should be the
-         * script, and any subsequent entries should be arguments to the script.
-         *
-         * Note that if arg_size is 0 no script argument was included.
-         */
-        if (arg_size > 0) {
-                memcpy(&context->argv, &arguments->argv[1], arg_size);
-
-                log(PLOG_DEBUG, PLUGIN_NAME, 
-                                "script_path=%s", 
-                                context->argv[SCRIPT_NAME_IDX]);
-        } else {
-                free(context);
+        retptr->type_mask = OPENVPN_PLUGIN_MASK(OPENVPN_PLUGIN_LEARN_ADDRESS);
+        
+        /* Checking if the second argument was provided, that's where 
+         * the script name is passed
+        */
+        if(!arguments->argv[1])
+        {
                 log(PLOG_ERR, PLUGIN_NAME, 
                                 "ERROR: no script_path specified in config file");
                 return OPENVPN_PLUGIN_FUNC_ERROR;
-        }        
+        }
+
+        context = calloc(1, sizeof(struct plugin_context));
+        if (context == NULL)
+        {
+                log(PLOG_ERR, PLUGIN_NAME, "PLUGIN: allocating memory for context failed");
+                return OPENVPN_PLUGIN_FUNC_ERROR;
+        }
+
+        context->plugin_log = log;
+        context->script_path = strdup(arguments->argv[1]);
+        if (context->script_path == NULL) {
+                log(PLOG_ERR, PLUGIN_NAME, "PLUGIN: strdup failed for script_path");
+                goto cleanup_context;
+        }
+        context->downrate = strdup(arguments->argv[2]);
+        if (context->downrate == NULL) {
+                log(PLOG_ERR, PLUGIN_NAME, "PLUGIN: strdup failed for downrate");
+                goto cleanup_context;
+        }
+        context->uprate = strdup(arguments->argv[3]);
+        if (context->uprate == NULL) {
+                log(PLOG_ERR, PLUGIN_NAME, "PLUGIN: strdup failed for uprate");
+                goto cleanup_context;
+        }
+        context->debug_mode = 0; // Default to off
+
+        // Loop through all arguments from the config to find the "debug" flag
+        for (int i = 0; arguments->argv[i] != NULL; i++) {
+                if (strcmp(arguments->argv[i], "debug") == 0) {
+                        context->debug_mode = 1;
+                        log(PLOG_DEBUG, PLUGIN_NAME, "Debug mode enabled by config argument.");
+                        break;
+                }
+        }
 
         /* Pass state back to OpenVPN so we get handed it back later */
-        retptr->handle = (openvpn_plugin_handle_t) context;
+        retptr->handle = (void *) context;
 
         log(PLOG_DEBUG, PLUGIN_NAME, "plugin initialized successfully");
 
         return OPENVPN_PLUGIN_FUNC_SUCCESS;
+
+cleanup_context:
+        free(context->script_path);
+        free(context->downrate);
+        free(context->uprate);
+        free(context);
+        return OPENVPN_PLUGIN_FUNC_ERROR;
 }
 
-/* Called when we need to handle  OPENVPN_PLUGIN_CLIENT_CONNECT | OPENVPN_PLUGIN_CLIENT_DISCONNECT calls */
+/* Called when we need to handle  OPENVPN_PLUGIN_LEARN_ADDRESS call */
 OPENVPN_EXPORT int openvpn_plugin_func_v3(const int struct_version,
                 struct openvpn_plugin_args_func_in const *arguments,
                 struct openvpn_plugin_args_func_return *retptr)
@@ -293,10 +365,10 @@ OPENVPN_EXPORT int openvpn_plugin_func_v3(const int struct_version,
                 return OPENVPN_PLUGIN_FUNC_ERROR;
         }
 
-        if(arguments->type == OPENVPN_PLUGIN_CLIENT_CONNECT || arguments->type == OPENVPN_PLUGIN_CLIENT_DISCONNECT) {
+        if(arguments->type == OPENVPN_PLUGIN_LEARN_ADDRESS) {
                 log(PLOG_DEBUG, PLUGIN_NAME,
-                                "Handling auth with deferred script");
-                return deferred_handler(context, arguments->envp);
+                                "Handling learn address with deferred script");
+                return deferred_handler(context, arguments->envp, arguments->argv);
         } else
                 return OPENVPN_PLUGIN_FUNC_SUCCESS;
 }
@@ -304,5 +376,10 @@ OPENVPN_EXPORT int openvpn_plugin_func_v3(const int struct_version,
 OPENVPN_EXPORT void openvpn_plugin_close_v1(openvpn_plugin_handle_t handle)
 {
         struct plugin_context *context = (struct plugin_context *) handle;
-        free(context);
+        if (context) {
+                free(context->script_path);
+                free(context->downrate);
+                free(context->uprate);
+                free(context);
+        }
 }
