@@ -1,4 +1,18 @@
 - commits:
+    - subject: Add learn-address-script and modify README
+      hash: d4481942bb5cce6492067ccb4919a98816950d78
+      body: |
+        Learn-address will handle bandwidth limiting
+        on a per client basis.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: jaomaloy
+      nested: []
+  version: 0.0.3
+  title: ""
+  date: 2025-07-29T05:40:24.260Z
+- commits:
     - subject: Add flowzone to repo
       hash: 9d44a94db28e92af5ad1c27cb0315c51e4b0b90b
       body: ""
